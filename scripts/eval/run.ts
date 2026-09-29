@@ -112,12 +112,11 @@ export async function run(): Promise<void> {
       let attempts: Attempt[] = [];
       let reference = "warmup";
       const engine = new Engine(loadSettings({
-        upstreamModel: model, temperature: config.temperature, maxOutputTokens: config.maxOutputTokens,
-        malformedRetries: config.malformedRetries, timeoutMs: config.timeoutSeconds * 1000, maxInflight: 1,
+        upstreamModel: model, timeoutMs: config.timeoutSeconds * 1000, maxInflight: 1,
       }), async (url, init) => {
         const body = JSON.parse(String(init?.body));
-        if (config.cacheMode === "bust-prefix") {
-          body.messages[0].content = `Request reference (not evidence): ${sha256(`${manifest.nonce}:${reference}:${attempts.length}`).slice(0, 24)}.\n` + body.messages[0].content;
+        if (config.cacheMode === "bust-prefix" && typeof body.prompt === "string") {
+          body.prompt = `Request reference (not evidence): ${sha256(`${manifest.nonce}:${reference}:${attempts.length}`).slice(0, 24)}.\n` + body.prompt;
         }
         const requestBody = JSON.stringify(body);
         const attempt: Attempt = {

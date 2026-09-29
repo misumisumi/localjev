@@ -26,6 +26,9 @@ export interface SystemOneRequest {
   state: string | JsonValue[] | { [key: string]: JsonValue };
   model: string;
   questions: Record<string, Question>;
+  permute?: boolean;
+  images?: string[];
+  audio?: string[];
 }
 
 export type NoulAnswer = { type: "noul"; noul: number };
@@ -155,6 +158,25 @@ function validateQuestion(raw: unknown, path: (string | number)[]): Question {
   fail([...path, "type"], "Question type must be 'noul', 'choice', or 'score'", raw.type);
 }
 
+function mediaList(
+  raw: Record<string, unknown>,
+  field: "images" | "audio",
+): string[] | undefined {
+  if (!(field in raw) || raw[field] === undefined) return undefined;
+  const value = raw[field];
+  if (!Array.isArray(value)) {
+    fail([field], `${field} must be an array of data URLs`, value);
+  }
+  const items: string[] = [];
+  for (const [index, item] of value.entries()) {
+    if (typeof item !== "string" || item.length === 0) {
+      fail([field, index], `${field} entries must be non-empty strings`, item);
+    }
+    items.push(item);
+  }
+  return items;
+}
+
 export function validateSystemOneRequest(raw: unknown): SystemOneRequest {
   if (!object(raw)) {
     fail([], "Request body must be an object", raw);
@@ -183,9 +205,17 @@ export function validateSystemOneRequest(raw: unknown): SystemOneRequest {
   for (const [key, value] of entries) {
     questions[key] = validateQuestion(value, ["questions", key]);
   }
+  if ("permute" in raw && typeof raw.permute !== "boolean") {
+    fail(["permute"], "permute must be a boolean", raw.permute);
+  }
+  const images = mediaList(raw, "images");
+  const audio = mediaList(raw, "audio");
   return {
     state: raw.state as SystemOneRequest["state"],
     model: raw.model,
     questions,
+    ...(raw.permute === undefined ? {} : { permute: raw.permute as boolean }),
+    ...(images === undefined ? {} : { images }),
+    ...(audio === undefined ? {} : { audio }),
   };
 }

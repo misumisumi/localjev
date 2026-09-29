@@ -10,7 +10,8 @@ import {
   BackendProtocolError,
   BackendUnavailableError,
   type DecisionEngine,
-  MalformedModelOutputError,
+  LabelMappingError,
+  MediaUnsupportedError,
   OverloadedError,
   UpstreamHttpError,
 } from "./engine";
@@ -91,7 +92,7 @@ function requestId(): string {
   return `req_${randomBytes(16).toString("hex")}`;
 }
 
-export class LocalJevApp {
+export class QevApp {
   constructor(
     readonly settings: Settings,
     readonly engine: DecisionEngine,
@@ -151,7 +152,18 @@ export class LocalJevApp {
       });
     }
     if (request.method === "GET" && pathname === "/v1/models") {
-      return jsonResponse({ models: MODELS });
+      const upstream = this.engine.upstreamModelId?.();
+      const models = upstream
+        ? [
+            ...MODELS,
+            {
+              name: upstream,
+              description: "Upstream llama-server model used for logprob readout.",
+              release_date: "unknown",
+            },
+          ]
+        : MODELS;
+      return jsonResponse({ models });
     }
     if (request.method === "POST" && pathname === "/v1/systemone") {
       return this.systemOne(request);
@@ -181,34 +193,55 @@ export class LocalJevApp {
       return apiError(
         404,
         "not_found_error",
-        `Model ${JSON.stringify(body.model)} not found. Available: localjev-latest.`,
+        `Model ${JSON.stringify(body.model)} not found. Available: qev-latest.`,
       );
     }
 
+    const totalStart = performance.now();
     try {
+      const modelStart = performance.now();
       const result = await this.engine.decide(
         body.questions,
         body.state,
         requestSeed(body),
-      );
-      return jsonResponse({
-        model: MODEL_VERSION,
-        answers: result.answers,
-        usage: {
-          input_tokens: result.inputTokens,
-          output_tokens: result.outputTokens,
+        {
+          ...(body.permute === undefined ? {} : { permute: body.permute }),
+          ...(body.images === undefined ? {} : { images: body.images }),
+          ...(body.audio === undefined ? {} : { audio: body.audio }),
         },
-      });
+      );
+      const modelMs = performance.now() - modelStart;
+      const totalMs = performance.now() - totalStart;
+      return jsonResponse(
+        {
+          model: MODEL_VERSION,
+          answers: result.answers,
+          usage: {
+            input_tokens: result.inputTokens,
+            output_tokens: result.outputTokens,
+          },
+        },
+        200,
+        {
+          "server-timing":
+            `model;dur=${modelMs.toFixed(1)}, ` +
+            `server;dur=${(totalMs - modelMs).toFixed(1)}, ` +
+            `total;dur=${totalMs.toFixed(1)}`,
+        },
+      );
     } catch (error) {
       if (error instanceof OverloadedError) {
         return apiError(529, "overloaded_error", error.message, {
           "retry-after": "1",
         });
       }
-      if (
-        error instanceof MalformedModelOutputError ||
-        error instanceof BackendProtocolError
-      ) {
+      if (error instanceof LabelMappingError) {
+        return apiError(400, "invalid_request_error", error.message);
+      }
+      if (error instanceof MediaUnsupportedError) {
+        return apiError(400, "invalid_request_error", error.message);
+      }
+      if (error instanceof BackendProtocolError) {
         return apiError(502, "api_error", error.message);
       }
       if (

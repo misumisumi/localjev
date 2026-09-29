@@ -1,3 +1,5 @@
+import type { EngineKind } from "./backends";
+
 export interface Settings {
   upstream: string;
   upstreamApiKey: string;
@@ -6,13 +8,25 @@ export interface Settings {
   host: string;
   port: number;
   timeoutMs: number;
-  maxOutputTokens: number;
-  malformedRetries: number;
-  temperature: number;
   maxInflight: number;
   maxQueue: number;
-  questionsPerCall: number;
-  outcomesPerCall: number;
+  labelBias: number;
+  logprobsK: number;
+  permuteDefault: boolean;
+  backend: EngineKind;
+  disableThinking: boolean;
+}
+
+const ENGINE_KINDS: readonly EngineKind[] = ["llamacpp", "vllm", "sglang", "openai"];
+
+function engineKind(defaultValue: EngineKind): EngineKind {
+  const raw = process.env.QEV_BACKEND?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return defaultValue;
+  if (raw === "llama.cpp" || raw === "llama_cpp") return "llamacpp";
+  if ((ENGINE_KINDS as readonly string[]).includes(raw)) return raw as EngineKind;
+  throw new Error(
+    `QEV_BACKEND must be one of ${ENGINE_KINDS.join(", ")} (or "llama.cpp"); got ${JSON.stringify(raw)}`,
+  );
 }
 
 function numberSetting(name: string, fallback: number, minimum: number): number {
@@ -32,38 +46,33 @@ function integerSetting(name: string, fallback: number, minimum: number): number
   return value;
 }
 
+function booleanSetting(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined) return fallback;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "0") return false;
+  throw new Error(`${name} must be true/false or 1/0`);
+}
+
 export function loadSettings(
   overrides: Partial<Settings> = {},
 ): Settings {
   return {
-    upstream: process.env.LOCALJEV_UPSTREAM ?? "http://127.0.0.1:8000",
-    upstreamApiKey: process.env.LOCALJEV_UPSTREAM_API_KEY ?? "",
-    upstreamModel:
-      process.env.LOCALJEV_UPSTREAM_MODEL ??
-      "diffusiongemma-26B-A4B-it-4bit",
-    apiKey: process.env.LOCALJEV_API_KEY ?? "",
-    host: process.env.LOCALJEV_HOST ?? "127.0.0.1",
-    port: integerSetting("LOCALJEV_PORT", 8080, 1),
-    timeoutMs: numberSetting("LOCALJEV_TIMEOUT", 180, 0.001) * 1_000,
-    maxOutputTokens: integerSetting(
-      "LOCALJEV_MAX_OUTPUT_TOKENS",
-      2_048,
-      1,
-    ),
-    malformedRetries: integerSetting("LOCALJEV_MALFORMED_RETRIES", 2, 0),
-    temperature: numberSetting("LOCALJEV_TEMPERATURE", 0, 0),
-    maxInflight: integerSetting("LOCALJEV_MAX_INFLIGHT", 2, 1),
-    maxQueue: integerSetting("LOCALJEV_MAX_QUEUE", 64, 1),
-    questionsPerCall: integerSetting(
-      "LOCALJEV_QUESTIONS_PER_CALL",
-      16,
-      1,
-    ),
-    outcomesPerCall: integerSetting(
-      "LOCALJEV_OUTCOMES_PER_CALL",
-      128,
-      1,
-    ),
+    upstream: process.env.QEV_UPSTREAM ?? "http://127.0.0.1:8000",
+    upstreamApiKey: process.env.QEV_UPSTREAM_API_KEY ?? "",
+    upstreamModel: process.env.QEV_UPSTREAM_MODEL ?? "",
+    apiKey: process.env.QEV_API_KEY ?? "",
+    host: process.env.QEV_HOST ?? "127.0.0.1",
+    port: integerSetting("QEV_PORT", 8081, 1),
+    timeoutMs: numberSetting("QEV_TIMEOUT", 60, 0.001) * 1_000,
+    maxInflight: integerSetting("QEV_MAX_INFLIGHT", 4, 1),
+    maxQueue: integerSetting("QEV_MAX_QUEUE", 64, 1),
+    labelBias: numberSetting("QEV_LABEL_BIAS", 10, 0),
+    logprobsK: integerSetting("QEV_LOGPROBS_K", 64, 1),
+    permuteDefault: booleanSetting("QEV_PERMUTE_DEFAULT", false),
+    backend: engineKind("llamacpp"),
+    disableThinking: booleanSetting("QEV_DISABLE_THINKING", false),
     ...overrides,
   };
 }
@@ -73,24 +82,29 @@ export function apiBaseUrl(settings: Settings): string {
   return base.endsWith("/v1") ? base : `${base}/v1`;
 }
 
-export const MODEL_VERSION = "localjev-0.2";
+export function upstreamRoot(settings: Settings): string {
+  const base = settings.upstream.replace(/\/+$/, "");
+  return base.endsWith("/v1") ? base.slice(0, -3) : base;
+}
+
+export const MODEL_VERSION = "qev-0.1";
 export const MODEL_ALIASES = new Set([
   MODEL_VERSION,
-  "localjev-latest",
+  "qev-latest",
   "jev-latest",
   "jev-preview",
 ]);
 export const MODELS = [
   {
-    name: "localjev-latest",
+    name: "qev-latest",
     description:
-      "Alias for LocalJev 0.2, backed by a local OpenAI-compatible DiffusionGemma endpoint.",
-    release_date: "2026-09-18",
+      "Alias for QEv 0.1, a Jev-compatible bridge reading first-token logprobs from a local llama-server.",
+    release_date: "2026-09-25",
   },
   {
     name: MODEL_VERSION,
     description:
-      "Jev-compatible prompted probability inference with DiffusionGemma.",
-    release_date: "2026-09-18",
+      "Jev-compatible probability inference read from llama-server first-token logprobs.",
+    release_date: "2026-09-25",
   },
 ] as const;
