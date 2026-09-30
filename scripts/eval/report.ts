@@ -41,7 +41,7 @@ export async function report(directory: string): Promise<void> {
   const summary = { runId: manifest.runId, results: rows.length, expectedResults: manifest.expectedResults, complete: rows.length === manifest.expectedResults, reportCodeHashes, cells, paired };
   await Bun.write(join(directory, "summary.json"), JSON.stringify(summary, null, 2) + "\n");
   const lines = [
-    `# QEv bake-off: ${manifest.runId}`, "",
+    `# LocalJev bake-off: ${manifest.runId}`, "",
     `Status: **${summary.complete ? "complete" : "PARTIAL"}** (${summary.results}/${summary.expectedResults} measured requests).`, "",
     `Runtime: Bun ${manifest.environment.bun}; ${manifest.environment.cpu}; ${manifest.environment.memoryGiB} GiB RAM; oMLX ${manifest.backendVersion ?? "unknown"}.`,
     `Seed ${config.seed}; configured ${config.samplesPerTask} balanced examples/task; selected ${manifest.examples.length} total examples${manifest.examples.length < config.samplesPerTask * 3 ? " (**LIMITED PILOT, not necessarily balanced**)" : ""}; temperature ${config.temperature}; max output ${config.maxOutputTokens}; up to ${config.malformedRetries} corrective retries; one request in flight.`,
@@ -55,7 +55,7 @@ export async function report(directory: string): Promise<void> {
     lines.push(`| ${c.model} | ${c.backgroundWords} | ${percent(c.tasks.ag_news!.effectiveAccuracy)} | ${percent(c.tasks.boolq!.effectiveAccuracy)} | ${percent(c.tasks.sst5!.effectiveAccuracy)} | ${fixed(c.tasks.sst5!.scoreMAE)} | ${percent(c.macroTaskAccuracy)} | ${c.timing.failures}/${c.timing.requests} |`);
   }
   lines.push("", "## Decision latency × model × input length", "",
-    "Wall time covers the real QEv Engine, tokenize/logprob reads upstream. Warm-ups/model loading are excluded. Latency includes failed requests. This non-streaming benchmark does **not measure TTFT**. No localhost Bun HTTP hop is included.", "",
+    "Wall time covers the real LocalJev Engine, tokenize/logprob reads upstream. Warm-ups/model loading are excluded. Latency includes failed requests. This non-streaming benchmark does **not measure TTFT**. No localhost Bun HTTP hop is included.", "",
     "| Model | Background words | p50 (s) ↓ | p95 (s) ↓ | Mean (s) ↓ | Input tokens, first attempt | Output tokens incl. retries | Retried | Cached input |",
     "|---|---:|---:|---:|---:|---:|---:|---:|---:|");
   for (const c of cells) {
@@ -63,7 +63,7 @@ export async function report(directory: string): Promise<void> {
     lines.push(`| ${c.model} | ${c.backgroundWords} | ${fixed(t.latencyP50Ms === null ? null : t.latencyP50Ms / 1000)} | ${fixed(t.latencyP95Ms === null ? null : t.latencyP95Ms / 1000)} | ${fixed(t.latencyMeanMs === null ? null : t.latencyMeanMs / 1000)} | ${fixed(t.firstAttemptInputTokensMean, 0)} | ${fixed(t.outputTokensMean, 1)} | ${t.retriedRequests}/${t.requests} | ${percent(t.reportedCachedFraction)} |`);
   }
   lines.push("", "## Per-task uncertainty and calibration", "",
-    "Wilson 95% intervals are indicative, unadjusted for multiple comparisons and class-stratified sampling. Calibration/F1/MAE are conditional on valid responses: always inspect coverage above. ECE uses 10 equal-width bins and **max class probability**, not QEv's entropy-based confidence. Tiny samples make ECE noisy. Brier is `(p_yes-y)²` for BoolQ and the sum over class errors for multiclass tasks; do not compare its magnitude across tasks. NLL clips probabilities at 1e-12; all probability metrics concern normalized first-token logprob distributions.", "",
+    "Wilson 95% intervals are indicative, unadjusted for multiple comparisons and class-stratified sampling. Calibration/F1/MAE are conditional on valid responses: always inspect coverage above. ECE uses 10 equal-width bins and **max class probability**, not LocalJev's entropy-based confidence. Tiny samples make ECE noisy. Brier is `(p_yes-y)²` for BoolQ and the sum over class errors for multiclass tasks; do not compare its magnitude across tasks. NLL clips probabilities at 1e-12; all probability metrics concern normalized first-token logprob distributions.", "",
     "| Model | Background | Task | Correct / total | Accuracy 95% interval | Macro F1 | Brier ↓ | NLL ↓ | ECE ↓ |",
     "|---|---:|---|---:|---|---:|---:|---:|---:|");
   for (const c of cells) for (const task of TASKS) {

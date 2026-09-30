@@ -5,7 +5,7 @@
 `githubnext/localjev` のフォーク。Jev 互換 `POST /v1/systemone` を OpenAI 互換
 Chat Completions 上に立てる Bun/TypeScript ブリッジ。
 
-フォークの目的は **QEv**: Engine の「JSON に確率を書かせる」経路を廃し、
+フォークの目的は **LocalJev**: Engine の「JSON に確率を書かせる」経路を廃し、
 **llama-server の first-token logprob 読み取り**へ置き換えること。
 設計文書: `../DograMagra/docs/specs/2026-09-25-qev-jev-frontend-llamacpp-backend-design.md`
 
@@ -13,18 +13,18 @@ Chat Completions 上に立てる Bun/TypeScript ブリッジ。
 
 | パス | 内容 | 状態 |
 |---|---|---|
-| `src/engine.ts` | 推論本体(`DecisionEngine` interface + logprob 読み取り Engine) | QEv 方式に書き換え済み |
-| `src/server.ts` / `src/types.ts` | wire API・検証・エラー形態(live Jev API 照合済み) | 維持(`QevApp` に改名、`permute` 追加) |
-| `src/config.ts` | Settings(`QEV_*` env、設計文書 §8) | QEv 向けに再定義済み |
+| `src/engine.ts` | 推論本体(`DecisionEngine` interface + logprob 読み取り Engine) | LocalJev 方式に書き換え済み |
+| `src/server.ts` / `src/types.ts` | wire API・検証・エラー形態(live Jev API 照合済み) | 維持(`LocalJevApp`、`permute` 追加) |
+| `src/config.ts` | Settings(`LOCALJEV_*` env、設計文書 §8) | LocalJev 向けに再定義済み |
 | `src/index.ts` | エントリ | 維持 |
-| `eval/` | gold 120(AG News/BoolQ/SST-5)× contexts + ハーネス | 維持(QEv vs LocalJev の対照評価) |
+| `eval/` | gold 120(AG News/BoolQ/SST-5)× contexts + ハーネス | 維持(本フォーク vs upstream の対照評価) |
 | `test/`, `scripts/`, `Makefile` | 開発用。`scripts/verify-readout.ts` は R1/R2/R3 のライブ検証 | 維持 |
 
 ## コマンド
 
 ```bash
 bun install                # Bun が .env を自動読込
-bun run start              # :8081 で起動 (QEV_UPSTREAM 等の .env 設定)
+bun run start              # :8081 で起動 (LOCALJEV_UPSTREAM 等の .env 設定)
 bun test; bun run typecheck; bun run smoke
 bun run verify             # R1/R2/R3 をライブ llama-server に対して検証
 bun run eval --out eval/runs/<name> [--limit N]
@@ -36,7 +36,7 @@ bun run eval:report
 - upstream 踏襲の簡潔な英文(`Implement ...`, `Add ...`)。スコープは任意
 - `.env` はコミットしない
 
-## QEv の確定した方針
+## LocalJev の確定した方針
 
 - 1 質問 = 1 読み取り(1 シーケンス)。バッチ読み取りは対象外 — AR では 1 forward で
   複数スロットを同時には読めないため
@@ -49,7 +49,7 @@ bun run eval:report
   答案成形(choice 最良選択・score 期待値 Σ i·pᵢ)
 - 廃棄する部分: `buildOutputSchema`, `buildSystemPrompt`, `extractJson`,
   malformed リトライループ, `groups()` 逐列チャンク
-- **マルチエンジン**: `QEV_BACKEND` で方言を切替(`src/backends.ts`)。`llamacpp` は
+- **マルチエンジン**: `LOCALJEV_BACKEND` で方言を切替(`src/backends.ts`)。`llamacpp` は
   logit_bias キー=トークン文字列・OpenAI 新 logprobs 形式。`vllm`/`sglang`/`openai` は
   キー=トークン ID 文字列・レガシー `top_logprobs`。`/tokenize` も root と `/v1` で差
 - **画像・音声**: Jev 拡張フィールド `images`/`audio`(data URL)。メディア付き読みのみ

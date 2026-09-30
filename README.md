@@ -1,19 +1,19 @@
-# QEv
+# LocalJev
 
 A local, Jev-compatible `POST /v1/systemone` API written in TypeScript for
-[Bun](https://bun.sh/). QEv reads probabilities from **first-token logprobs of a
+[Bun](https://bun.sh/). LocalJev reads probabilities from **first-token logprobs of a
 local llama-server** instead of asking a model to write JSON probabilities.
 
 The defaults target:
 
 - inference server: `http://127.0.0.1:8000` (llama-server, unpatched)
-- QEv API: `http://127.0.0.1:8081`
+- LocalJev API: `http://127.0.0.1:8081`
 
 ## How the read works
 
 [Jev](https://typesafe.ai/) uses a typed decision API rather than an OpenAI chat
 API. OpenJev obtains probabilities with a one-step DiffusionGemma structured read
-over patched vLLM extensions. QEv gets equivalent first-token probabilities from
+over patched vLLM extensions. LocalJev gets equivalent first-token probabilities from
 an **unpatched** llama-server:
 
 1. translate `state` and typed Jev questions into a plain classification prompt
@@ -31,8 +31,8 @@ an **unpatched** llama-server:
    Jev response shape.
 
 One question is one read (autoregressive decoding cannot fill several slots in
-one forward pass); questions run in parallel under `QEV_MAX_INFLIGHT`, and
-waiting decisions beyond `QEV_MAX_QUEUE` get HTTP 529.
+one forward pass); questions run in parallel under `LOCALJEV_MAX_INFLIGHT`, and
+waiting decisions beyond `LOCALJEV_MAX_QUEUE` get HTTP 529.
 
 These probabilities are **uncalibrated next-token distributions** from a
 generative model, not trained confidence. Evaluate calibration on your own
@@ -45,7 +45,7 @@ that exposes `logprobs` and `logit_bias` on `/v1/completions`).
 
 ```sh
 bun install
-cp .env.example .env   # adjust QEV_UPSTREAM / QEV_UPSTREAM_MODEL if needed
+cp .env.example .env   # adjust LOCALJEV_UPSTREAM / LOCALJEV_UPSTREAM_MODEL if needed
 bun run start
 ```
 
@@ -87,12 +87,12 @@ curl http://127.0.0.1:8081/v1/systemone \
 ```
 
 Optional request field: `"permute": true` averages two reads with the option→label
-mapping reversed (position-bias mitigation at 2× cost; `QEV_PERMUTE_DEFAULT`
+mapping reversed (position-bias mitigation at 2× cost; `LOCALJEV_PERMUTE_DEFAULT`
 enables it globally).
 
 ## Images and audio
 
-Jev's own contract is text-only, so QEv carries media in two optional request
+Jev's own contract is text-only, so LocalJev carries media in two optional request
 fields next to `state`:
 
 ```json
@@ -110,31 +110,31 @@ fields next to `state`:
   includes media is sent to `POST /v1/chat/completions` as a user message with
   content parts (`image_url`, `input_audio`, then the text prompt). Text-only
   questions keep using `POST /v1/completions`.
-- Thinking must not run before the label token, so set `QEV_DISABLE_THINKING=true`
+- Thinking must not run before the label token, so set `LOCALJEV_DISABLE_THINKING=true`
   for reasoning models that would otherwise emit a thought block. This mirrors
   the classification readout: the first generated token has to be the label.
 - **Audio requires a non-llama.cpp backend.** llama.cpp does not serve audio
-  input; audio requests against `QEV_BACKEND=llamacpp` return HTTP 400. Images
+  input; audio requests against `LOCALJEV_BACKEND=llamacpp` return HTTP 400. Images
   work with llama.cpp when the server is started with a projector (`--mmproj`).
 
 ## Other inference backends
 
 The readout is OpenAI-shaped, so vLLM, SGLang, and other OpenAI-compatible
-servers work by setting `QEV_BACKEND`:
+servers work by setting `LOCALJEV_BACKEND`:
 
 | Value | `logit_bias` keys | logprobs shape | `/tokenize` | audio |
 |---|---|---|---|---|
 | `llamacpp` (default) | token **strings** (`"A"`) | OpenAI `content[0].top_logprobs` | `/v1/tokenize`, `{content}` | no |
 | `vllm`, `sglang`, `openai` | token **IDs** as strings (`"32"`) | legacy `top_logprobs` list of maps | root `/tokenize`, `{model, prompt}` | yes |
 
-QEv resolves each label to a single tokenizer token with `/tokenize`, then forces
+LocalJev resolves each label to a single tokenizer token with `/tokenize`, then forces
 the labels into the returned logprobs with the same `logit_bias` value on every
 label (the bias cancels in the softmax over labels). `token_id:NNN` logprob keys
 are also recognized.
 
 ## Use the TypeSafe SDK
 
-The SDK requires an API-key value. QEv accepts any value unless `QEV_API_KEY` is
+The SDK requires an API-key value. LocalJev accepts any value unless `LOCALJEV_API_KEY` is
 configured. Set the SDK environment for your shell:
 
 ```sh
@@ -166,20 +166,20 @@ unchanged.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `QEV_UPSTREAM` | `http://127.0.0.1:8000` | llama-server base URL, with or without `/v1` |
-| `QEV_UPSTREAM_API_KEY` | empty | Bearer key sent to the inference server |
-| `QEV_UPSTREAM_MODEL` | empty | Upstream model id; when empty, the first model from upstream `/v1/models` |
-| `QEV_API_KEY` | empty | Optional Bearer key required from QEv clients |
-| `QEV_BACKEND` | `llamacpp` | Readout dialect: `llamacpp`, `vllm`, `sglang`, or `openai` (see below) |
-| `QEV_DISABLE_THINKING` | `false` | Send `chat_template_kwargs: {"enable_thinking": false}` on media (chat) reads |
-| `QEV_HOST` | `127.0.0.1` | Listen address |
-| `QEV_PORT` | `8081` | Listen port |
-| `QEV_TIMEOUT` | `60` | Upstream timeout in seconds |
-| `QEV_MAX_INFLIGHT` | `4` | Concurrent upstream reads |
-| `QEV_MAX_QUEUE` | `64` | Waiting decisions before HTTP 529 |
-| `QEV_LABEL_BIAS` | `10` | Additive logit_bias applied to every label token |
-| `QEV_LOGPROBS_K` | `64` | Top-K size requested from upstream logprobs |
-| `QEV_PERMUTE_DEFAULT` | `false` | Average reversed-label reads by default (2× cost) |
+| `LOCALJEV_UPSTREAM` | `http://127.0.0.1:8000` | llama-server base URL, with or without `/v1` |
+| `LOCALJEV_UPSTREAM_API_KEY` | empty | Bearer key sent to the inference server |
+| `LOCALJEV_UPSTREAM_MODEL` | empty | Upstream model id; when empty, the first model from upstream `/v1/models` |
+| `LOCALJEV_API_KEY` | empty | Optional Bearer key required from LocalJev clients |
+| `LOCALJEV_BACKEND` | `llamacpp` | Readout dialect: `llamacpp`, `vllm`, `sglang`, or `openai` (see below) |
+| `LOCALJEV_DISABLE_THINKING` | `false` | Send `chat_template_kwargs: {"enable_thinking": false}` on media (chat) reads |
+| `LOCALJEV_HOST` | `127.0.0.1` | Listen address |
+| `LOCALJEV_PORT` | `8081` | Listen port |
+| `LOCALJEV_TIMEOUT` | `60` | Upstream timeout in seconds |
+| `LOCALJEV_MAX_INFLIGHT` | `4` | Concurrent upstream reads |
+| `LOCALJEV_MAX_QUEUE` | `64` | Waiting decisions before HTTP 529 |
+| `LOCALJEV_LABEL_BIAS` | `10` | Additive logit_bias applied to every label token |
+| `LOCALJEV_LOGPROBS_K` | `64` | Top-K size requested from upstream logprobs |
+| `LOCALJEV_PERMUTE_DEFAULT` | `false` | Average reversed-label reads by default (2× cost) |
 
 ## Development
 
@@ -196,14 +196,14 @@ server build: whether `logit_bias` cancels out in label logprob differences
 (R1), whether all biased labels appear within top-K (R2), and whether every
 label candidate is a single tokenizer token (R3). llama-server computes top
 logprobs from **pre-sampling** `log(softmax(logits))`, so llama.cpp requires no
-patch; it does not expose raw full-vocabulary logits over HTTP, and QEv does not
+patch; it does not expose raw full-vocabulary logits over HTTP, and LocalJev does not
 need them.
 
 ## Evaluate different models
 
 The repeatable bake-off uses public gold labels for news categorization (AG News),
 yes/no reading comprehension (BoolQ), and five-level sentiment (SST-5). It runs
-the same QEv engine against multiple installed models, comparing quality,
+the same LocalJev engine against multiple installed models, comparing quality,
 calibration, and full-decision latency at two actual input lengths.
 
 ```sh
@@ -217,6 +217,18 @@ bun run eval --out eval/runs/my-bakeoff
 bun run eval:report eval/runs/my-bakeoff
 ```
 
-Requires a running llama-server serving the eval models; no running QEv HTTP
+Requires a running llama-server serving the eval models; no running LocalJev HTTP
 server or Python is needed. See [the evaluation guide](docs/evaluation.md) for
 pinned data sources, methodology, configuration, resuming runs, and limitations.
+
+## Deploy
+
+`Dockerfile` builds the LocalJev image (no GPU or CUDA needed; it only speaks HTTP to
+the inference server). `deploy/testllm/Dockerfile` builds a self-contained Gemma 4
+E2B test backend on llama.cpp, including the multimodal projector. Kubernetes/Podman
+manifests live in [`deploy/`](deploy/README.md).
+
+```sh
+podman build -t localhost/localjev:latest .
+podman build -f deploy/testllm/Dockerfile -t localhost/testllm:latest .
+```

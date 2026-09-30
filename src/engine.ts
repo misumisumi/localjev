@@ -149,7 +149,7 @@ export function labelsFor(question: PreparedQuestion): string[] {
   }
   if (question.choices.length > CHOICE_LABELS.length) {
     throw new LabelMappingError(
-      `A choice question supports at most ${CHOICE_LABELS.length} options in QEv ` +
+      `A choice question supports at most ${CHOICE_LABELS.length} options in LocalJev ` +
         `(one single-token label per option); got ${question.choices.length}.`,
     );
   }
@@ -197,7 +197,7 @@ export function softmaxFromLogprobs(values: (number | null)[]): number[] {
   if (present.length === 0) {
     throw new BackendProtocolError(
       "no answer label appeared in the upstream top logprobs; " +
-        "increase QEV_LOGPROBS_K or check QEV_LABEL_BIAS",
+        "increase LOCALJEV_LOGPROBS_K or check LOCALJEV_LABEL_BIAS",
     );
   }
   const maximum = Math.max(...present);
@@ -435,7 +435,7 @@ export class Engine implements DecisionEngine {
     options?: DecisionOptions,
   ): Promise<DecisionResult> {
     if (this.waiting >= this.settings.maxQueue) {
-      throw new OverloadedError("QEv is at capacity. Retry shortly.");
+      throw new OverloadedError("LocalJev is at capacity. Retry shortly.");
     }
     this.waiting += 1;
     try {
@@ -448,7 +448,7 @@ export class Engine implements DecisionEngine {
       const hasMedia = media.images.length > 0 || media.audio.length > 0;
       if (media.audio.length > 0 && !this.dialect.supportsAudio) {
         throw new MediaUnsupportedError(
-          "audio input requires an OpenAI-compatible backend (set QEV_BACKEND=vllm, sglang, or openai)",
+          "audio input requires an OpenAI-compatible backend (set LOCALJEV_BACKEND=vllm, sglang, or openai)",
         );
       }
       const plans = prepared.map((question) => {

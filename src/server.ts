@@ -92,7 +92,7 @@ function requestId(): string {
   return `req_${randomBytes(16).toString("hex")}`;
 }
 
-export class QevApp {
+export class LocalJevApp {
   constructor(
     readonly settings: Settings,
     readonly engine: DecisionEngine,
@@ -193,7 +193,7 @@ export class QevApp {
       return apiError(
         404,
         "not_found_error",
-        `Model ${JSON.stringify(body.model)} not found. Available: qev-latest.`,
+        `Model ${JSON.stringify(body.model)} not found. Available: localjev-latest.`,
       );
     }
 

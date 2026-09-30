@@ -1,15 +1,15 @@
 import { loadSettings } from "./config";
 import { Engine } from "./engine";
-import { QevApp } from "./server";
+import { LocalJevApp } from "./server";
 
 export { loadSettings } from "./config";
 export { Engine } from "./engine";
-export { QevApp } from "./server";
+export { LocalJevApp } from "./server";
 export * from "./types";
 
 if (import.meta.main) {
   const settings = loadSettings();
-  const app = new QevApp(settings, new Engine(settings));
+  const app = new LocalJevApp(settings, new Engine(settings));
   const server = Bun.serve({
     hostname: settings.host,
     port: settings.port,
@@ -17,7 +17,7 @@ if (import.meta.main) {
     fetch: (request) => app.fetch(request),
   });
 
-  console.log(`QEv listening on ${server.url}`);
+  console.log(`LocalJev listening on ${server.url}`);
 
   let closing = false;
   const shutdown = async () => {

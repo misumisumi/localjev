@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "qev",
+      "name": "localjev",
       "devDependencies": {
         "@types/bun": "latest",
         "hyparquet": "^1.31.1",

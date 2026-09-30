@@ -1,7 +1,7 @@
 import { apiBaseUrl, loadSettings } from "../src/config";
 import { CHOICE_LABELS } from "../src/engine";
 
-// Pre-implementation verification for QEv (design doc section 11):
+// Pre-implementation verification for LocalJev (design doc section 11):
 //   R1: are top logprobs computed after logit_bias (so label differences survive bias)?
 //   R2: do all biased labels appear within top-K?
 //   R3: are all label candidates single tokens in the upstream tokenizer?

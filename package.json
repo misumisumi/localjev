@@ -1,5 +1,5 @@
 {
-  "name": "qev",
+  "name": "localjev",
   "version": "0.1.0",
   "description": "A Jev-compatible System One API reading first-token logprobs from a local llama-server",
   "type": "module",

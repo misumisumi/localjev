@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { loadSettings } from "../src/config";
 import type { DecisionEngine } from "../src/engine";
-import { QevApp } from "../src/server";
+import { LocalJevApp } from "../src/server";
 
 const requestBody = {
   model: "jev-latest",
@@ -40,30 +40,30 @@ function post(body: unknown, headers: HeadersInit = {}): Request {
 
 describe("Jev API", () => {
   test("returns the expected wire shape and request headers", async () => {
-    const app = new QevApp(loadSettings(), fakeEngine);
+    const app = new LocalJevApp(loadSettings(), fakeEngine);
     const response = await app.fetch(post(requestBody));
     expect(response.status).toBe(200);
     expect(response.headers.get("x-typesafe-request-id")).toStartWith("req_");
     expect(response.headers.get("server-timing")).toContain("model;dur=");
     expect(await response.json()).toEqual({
-      model: "qev-0.1",
+      model: "localjev-0.1",
       answers: { urgent: { type: "noul", noul: 0.95 } },
       usage: { input_tokens: 42, output_tokens: 7 },
     });
   });
 
   test("serves models, health, and readiness", async () => {
-    const app = new QevApp(loadSettings(), fakeEngine);
+    const app = new LocalJevApp(loadSettings(), fakeEngine);
     const health = await app.fetch(new Request("http://localhost/health"));
     const ready = await app.fetch(new Request("http://localhost/ready"));
     const models = await app.fetch(new Request("http://localhost/v1/models"));
     expect(await health.json()).toEqual({ status: "ok" });
     expect(await ready.json()).toMatchObject({ status: "ready" });
-    expect((await models.json()).models[0].name).toBe("qev-latest");
+    expect((await models.json()).models[0].name).toBe("localjev-latest");
   });
 
   test("returns Jev-style validation and model errors", async () => {
-    const app = new QevApp(loadSettings(), fakeEngine);
+    const app = new LocalJevApp(loadSettings(), fakeEngine);
     const missingState = await app.fetch(
       post({ model: "jev-latest", questions: requestBody.questions }),
     );
@@ -98,7 +98,7 @@ describe("Jev API", () => {
         };
       },
     };
-    const app = new QevApp(loadSettings(), engine);
+    const app = new LocalJevApp(loadSettings(), engine);
     await app.fetch(post({ ...requestBody, permute: true }));
     await app.fetch(post(requestBody));
     expect(seen).toEqual([true, undefined]);
@@ -116,7 +116,7 @@ describe("Jev API", () => {
         };
       },
     };
-    const app = new QevApp(loadSettings(), engine);
+    const app = new LocalJevApp(loadSettings(), engine);
     await app.fetch(
       post({
         ...requestBody,
@@ -131,7 +131,7 @@ describe("Jev API", () => {
   });
 
   test("rejects malformed images and audio arrays", async () => {
-    const app = new QevApp(loadSettings(), fakeEngine);
+    const app = new LocalJevApp(loadSettings(), fakeEngine);
     const badImages = await app.fetch(post({ ...requestBody, images: "nope" }));
     const badAudio = await app.fetch(post({ ...requestBody, audio: [123] }));
     expect(badImages.status).toBe(422);
@@ -140,7 +140,7 @@ describe("Jev API", () => {
   });
 
   test("supports optional client authentication", async () => {
-    const app = new QevApp(
+    const app = new LocalJevApp(
       loadSettings({ apiKey: "local-secret" }),
       fakeEngine,
     );
