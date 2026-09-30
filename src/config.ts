@@ -1,4 +1,9 @@
-import type { EngineKind } from "./backends";
+import type { EngineKind, ReadoutMode } from "./backends";
+
+// "auto" follows the backend dialect's default (llamacpp -> "vocab", others ->
+// "bias"); set explicitly to override a backend whose logprob semantics differ
+// from its dialect default.
+export type ReadoutSetting = "auto" | ReadoutMode;
 
 export interface Settings {
   upstream: string;
@@ -12,12 +17,14 @@ export interface Settings {
   maxQueue: number;
   labelBias: number;
   logprobsK: number;
+  readout: ReadoutSetting;
   permuteDefault: boolean;
   backend: EngineKind;
   disableThinking: boolean;
 }
 
 const ENGINE_KINDS: readonly EngineKind[] = ["llamacpp", "vllm", "sglang", "openai"];
+const READOUT_MODES: readonly ReadoutSetting[] = ["auto", "bias", "vocab", "selective"];
 
 function engineKind(defaultValue: EngineKind): EngineKind {
   const raw = process.env.LOCALJEV_BACKEND?.trim().toLowerCase();
@@ -26,6 +33,15 @@ function engineKind(defaultValue: EngineKind): EngineKind {
   if ((ENGINE_KINDS as readonly string[]).includes(raw)) return raw as EngineKind;
   throw new Error(
     `LOCALJEV_BACKEND must be one of ${ENGINE_KINDS.join(", ")} (or "llama.cpp"); got ${JSON.stringify(raw)}`,
+  );
+}
+
+function readoutSetting(): ReadoutSetting {
+  const raw = process.env.LOCALJEV_READOUT?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return "auto";
+  if ((READOUT_MODES as readonly string[]).includes(raw)) return raw as ReadoutSetting;
+  throw new Error(
+    `LOCALJEV_READOUT must be one of ${READOUT_MODES.join(", ")}; got ${JSON.stringify(raw)}`,
   );
 }
 
@@ -70,6 +86,7 @@ export function loadSettings(
     maxQueue: integerSetting("LOCALJEV_MAX_QUEUE", 64, 1),
     labelBias: numberSetting("LOCALJEV_LABEL_BIAS", 10, 0),
     logprobsK: integerSetting("LOCALJEV_LOGPROBS_K", 64, 1),
+    readout: readoutSetting(),
     permuteDefault: booleanSetting("LOCALJEV_PERMUTE_DEFAULT", false),
     backend: engineKind("llamacpp"),
     disableThinking: booleanSetting("LOCALJEV_DISABLE_THINKING", false),

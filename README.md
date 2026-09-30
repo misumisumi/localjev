@@ -20,15 +20,41 @@ an **unpatched** llama-server:
    (state first so the KV prefix is reusable across questions; client question
    keys never reach the prompt);
 2. map each option to a single-token label — `A..Z` for choice, `0..9` for score,
-   `yes`/`no` for noul — validated once against `/v1/tokenize`;
-3. send `POST /v1/completions` with `max_tokens: 1`, `logprobs: K`, and the **same
-   additive `logit_bias` on every label token**, so all labels are guaranteed to
-   appear in the returned top-K;
-4. restore the restricted softmax over labels from **logprob differences** (the
-   identical bias term cancels; labels absent from top-K get probability 0);
+   `yes`/`no` for noul — validated once against `/tokenize`;
+3. read the first token's logprobs for every label. Three readout strategies are
+   available (`LOCALJEV_READOUT`):
+   - **`vocab`** (llama.cpp default): send `POST /v1/completions` with
+     `max_tokens: 1` and request the whole vocabulary (`logprobs` clamped to
+     `n_vocab`), then read each label directly. No patch and no `logit_bias` —
+     required because llama.cpp returns **pre-sampling** `log(softmax(logits))`
+     that ignores `logit_bias`.
+   - **`bias`** (OpenAI default): apply the **same additive `logit_bias` on every
+     label token** and request `LOCALJEV_LOGPROBS_K`; works when the engine's
+     logprobs reflect `logit_bias` (post-bias) or the labels fall inside top-K.
+   - **`selective`** (vLLM/SGLang default): ask the engine for logprobs of exactly
+     the label token ids through its native API — vLLM `logprob_token_ids` on
+     `POST /v1/completions` (requires **vLLM ≥ 0.26.0**, vllm-project/vllm#43463)
+     or SGLang `token_ids_logprob` on `POST /generate`. One request, smallest
+     payload, no bias dependence. If the engine or endpoint is unavailable,
+     LocalJev logs a one-time warning and falls back to `bias`.
+4. restore the restricted softmax over labels from **logprob differences** / raw
+   label logprobs (a shared bias term cancels; labels that are absent get
+   probability 0). Labels are matched by **token id**, because several ids can
+   decode to the same label string;
 5. calculate Jev-compatible choices (`choice` = best client key), expected scores
    (`Σ i·pᵢ` with legend), normalized entropy confidence, and return the normal
    Jev response shape.
+
+Engines differ in how they expose logprobs, so the effective readout differs per
+backend (see the table below). The returned probabilities are the raw next-token
+distribution in every case; the strategies are not interchangeable in cost, though:
+`vocab` returns the whole vocabulary, `bias`/`selective` return a handful of
+tokens. `GET /ready` reports the configured `backend`, the `readout`, whether the
+backend `selectiveSupported`, and any fallback `warning`.
+
+Run `bun run verify` against your server to confirm which strategy it needs:
+it reports whether `logit_bias` is reflected in the logprobs and whether every
+label is readable under the configured readout.
 
 One question is one read (autoregressive decoding cannot fill several slots in
 one forward pass); questions run in parallel under `LOCALJEV_MAX_INFLIGHT`, and
@@ -122,15 +148,46 @@ fields next to `state`:
 The readout is OpenAI-shaped, so vLLM, SGLang, and other OpenAI-compatible
 servers work by setting `LOCALJEV_BACKEND`:
 
-| Value | `logit_bias` keys | logprobs shape | `/tokenize` | audio |
-|---|---|---|---|---|
-| `llamacpp` (default) | token **strings** (`"A"`) | OpenAI `content[0].top_logprobs` | `/v1/tokenize`, `{content}` | no |
-| `vllm`, `sglang`, `openai` | token **IDs** as strings (`"32"`) | legacy `top_logprobs` list of maps | root `/tokenize`, `{model, prompt}` | yes |
+| Value | `logit_bias` keys | logprobs shape | `/tokenize` | default readout | audio |
+|---|---|---|---|---|---|
+| `llamacpp` (default) | token **strings** (`"A"`) | OpenAI `content[0].top_logprobs` | root `/tokenize`, `{content}` | `vocab` | no |
+| `vllm` | token **IDs** as strings (`"32"`) | legacy `top_logprobs` list of maps | root `/tokenize`, `{model, prompt}` | `selective` | yes |
+| `sglang` | token **IDs** as strings (`"32"`) | legacy `top_logprobs` list of maps | root `/tokenize`, `{model, prompt}` | `selective` | yes |
+| `openai` | token **IDs** as strings (`"32"`) | legacy `top_logprobs` list of maps | root `/tokenize`, `{model, prompt}` | `bias` | yes |
 
-LocalJev resolves each label to a single tokenizer token with `/tokenize`, then forces
-the labels into the returned logprobs with the same `logit_bias` value on every
-label (the bias cancels in the softmax over labels). `token_id:NNN` logprob keys
-are also recognized.
+LocalJev resolves each label to a single tokenizer token with `/tokenize`, then
+reads that label's logprob from the first-token distribution (matching by token
+id, since a label string can map to several ids). `token_id:NNN` logprob keys are
+also recognized.
+
+- **llama.cpp**: uses `vocab`. Stock llama-server computes `/v1` top logprobs from
+  **pre-sampling** `log(softmax(logits))` and therefore **ignores `logit_bias`**
+  (ggml-org/llama.cpp#10783). `vocab` asks for the full vocabulary so every label
+  is present; no patch is needed. A single read is larger (≈26 MB for a 262144-token
+  vocabulary) — lower `LOCALJEV_MAX_INFLIGHT` if RAM is tight.
+- **vLLM / SGLang**: use `selective`. LocalJev asks for logprobs of exactly the
+  label token ids in one request — SGLang `/generate` with `token_ids_logprob`, or
+  vLLM `/v1/completions` with `logprob_token_ids` (**requires vLLM ≥ 0.26.0**;
+  vllm-project/vllm#43463, merged 2026-07-13). Older vLLM silently ignores the
+  field, so LocalJev detects the missing labels, logs a one-time warning, and
+  falls back to `bias`. This avoids vLLM v1's raw-logprobs/bias pitfall, the
+  max-logprobs limit, and the `/generative_scoring` speculative-decoding crash
+  (vllm-project/vllm#42592).
+  Note: vLLM returns selected-token logprobs at reduced precision for tokens
+  outside the natural top-k (measured ≈0.125 step at logprob ≈ −20, i.e. bf16
+  resolution), so labels whose true probabilities differ by less than that step
+  come back tied and the choice falls to tie-break order. SGLang returns finer
+  (fp32) values. Ties only affect near-equal labels, which LocalJev reports with
+  low confidence.
+- **OpenAI**: uses `bias` (no selective endpoint). OpenAI caps `top_logprobs` at
+  20 and does not return token ids, so it cannot use `vocab`; results are
+  best-effort.
+
+The readout differs by engine, so cost and semantics are not identical:
+`vocab` is a full-vocabulary read (exact pre-sampling distribution, heavy);
+`bias`/`selective` return only a few tokens. `bias` depends on the server's
+post-bias logprob semantics; `selective`/`vocab` do not. `bun run verify` reports
+which applies to your server.
 
 ## Use the TypeSafe SDK
 
@@ -171,14 +228,15 @@ unchanged.
 | `LOCALJEV_UPSTREAM_MODEL` | empty | Upstream model id; when empty, the first model from upstream `/v1/models` |
 | `LOCALJEV_API_KEY` | empty | Optional Bearer key required from LocalJev clients |
 | `LOCALJEV_BACKEND` | `llamacpp` | Readout dialect: `llamacpp`, `vllm`, `sglang`, or `openai` (see below) |
+| `LOCALJEV_READOUT` | `auto` | Label readout: `auto` (backend default), `bias`, `vocab`, or `selective` |
 | `LOCALJEV_DISABLE_THINKING` | `false` | Send `chat_template_kwargs: {"enable_thinking": false}` on media (chat) reads |
 | `LOCALJEV_HOST` | `127.0.0.1` | Listen address |
 | `LOCALJEV_PORT` | `8081` | Listen port |
 | `LOCALJEV_TIMEOUT` | `60` | Upstream timeout in seconds |
 | `LOCALJEV_MAX_INFLIGHT` | `4` | Concurrent upstream reads |
 | `LOCALJEV_MAX_QUEUE` | `64` | Waiting decisions before HTTP 529 |
-| `LOCALJEV_LABEL_BIAS` | `10` | Additive logit_bias applied to every label token |
-| `LOCALJEV_LOGPROBS_K` | `64` | Top-K size requested from upstream logprobs |
+| `LOCALJEV_LABEL_BIAS` | `10` | Additive logit_bias applied to every label token (`bias` readout only) |
+| `LOCALJEV_LOGPROBS_K` | `64` | Top-K size requested from upstream logprobs (`bias` readout only) |
 | `LOCALJEV_PERMUTE_DEFAULT` | `false` | Average reversed-label reads by default (2× cost) |
 
 ## Development
@@ -191,13 +249,13 @@ bun run smoke         # live decision through the Engine against your llama-serv
 bun run verify        # R1/R2/R3 readout checks against a live llama-server
 ```
 
-`verify` answers the three implementation-critical questions against your actual
-server build: whether `logit_bias` cancels out in label logprob differences
-(R1), whether all biased labels appear within top-K (R2), and whether every
-label candidate is a single tokenizer token (R3). llama-server computes top
-logprobs from **pre-sampling** `log(softmax(logits))`, so llama.cpp requires no
-patch; it does not expose raw full-vocabulary logits over HTTP, and LocalJev does not
-need them.
+`verify` answers the implementation-critical questions against your actual server
+build: whether `logit_bias` is reflected in the returned logprobs (R1), whether
+every label is readable under the configured readout (R2), and whether every
+label candidate is a single tokenizer token (R3). Stock llama-server computes
+`/v1` top logprobs from **pre-sampling** `log(softmax(logits))`, so `logit_bias`
+has no effect on them; LocalJev therefore reads llama.cpp with the `vocab`
+strategy (the returned `logprobs` list is clamped to `n_vocab`), with no patch.
 
 ## Evaluate different models
 

@@ -149,6 +149,7 @@ export class LocalJevApp {
       return jsonResponse({
         status: "ready",
         upstream_model: this.settings.upstreamModel,
+        ...(this.engine.readoutStatus?.() ?? {}),
       });
     }
     if (request.method === "GET" && pathname === "/v1/models") {

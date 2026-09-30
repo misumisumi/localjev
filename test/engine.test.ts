@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { loadSettings } from "../src/config";
+import { FULL_VOCAB_LOGPROBS } from "../src/backends";
 import {
   BackendProtocolError,
   Engine,
@@ -200,7 +201,7 @@ test("decide reads every question from one max_tokens=1 completion", async () =>
     const labels = Object.keys((body?.logit_bias ?? {}) as Record<string, number>);
     return completionResponse(labels, probabilitiesFrom(body ?? {}));
   };
-  const settings = loadSettings({ upstreamApiKey: "test-only-secret" });
+  const settings = loadSettings({ upstreamApiKey: "test-only-secret", readout: "bias" });
   const engine = new Engine(settings, fetchMock);
   const result = await engine.decide(questions, "customer message", 123);
 
@@ -255,7 +256,7 @@ test("permute reads labels in reversed order twice and averages them", async () 
         : probabilitiesFrom(body);
     return completionResponse(labels, probabilities);
   };
-  const engine = new Engine(loadSettings(), fetchMock);
+  const engine = new Engine(loadSettings({ readout: "bias" }), fetchMock);
   const result = await engine.decide(
     {
       department: questions.department!,
@@ -325,6 +326,78 @@ test("upstream without logprobs is a protocol error", async () => {
   ).rejects.toThrow(BackendProtocolError);
 });
 
+describe("llama.cpp full-vocabulary readout (unpatched)", () => {
+  const id = (label: string) => 200000 + label.charCodeAt(0);
+
+  test("requests the full vocabulary, omits logit_bias, and matches labels by token id", async () => {
+    const calls: { url: string; body?: Record<string, unknown> }[] = [];
+    const fetchMock = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      const body = init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+        : undefined;
+      calls.push({ url, ...(body ? { body } : {}) });
+      if (url.endsWith("/tokenize")) {
+        return Response.json({ tokens: [id(String(body?.content))] });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: "test-model" }] });
+      }
+      // `"A"` decodes from two ids; the decoy (id 303) appears last and must not
+      // win over the tokenizer id returned by /tokenize.
+      return Response.json({
+        choices: [
+          {
+            logprobs: {
+              content: [
+                {
+                  token: "B",
+                  id: id("B"),
+                  logprob: ln(0.3),
+                  top_logprobs: [
+                    { token: "A", id: id("A"), logprob: ln(0.6) },
+                    { token: "A", id: 303, logprob: ln(0.01) },
+                    { token: "B", id: id("B"), logprob: ln(0.3) },
+                    { token: "C", id: id("C"), logprob: ln(0.1) },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 1 },
+      });
+    };
+    const engine = new Engine(loadSettings(), fetchMock);
+    const result = await engine.decide(
+      {
+        department: {
+          type: "choice",
+          instructions: "Which team?",
+          criteria: { billing: "payments", technical: "bugs", sales: "pricing" },
+        },
+      },
+      "state",
+      1,
+    );
+
+    const completion = calls.find((call) => call.url.endsWith("/completions"));
+    expect(completion?.body?.logprobs).toBe(FULL_VOCAB_LOGPROBS);
+    expect(completion?.body?.logit_bias).toBeUndefined();
+    expect(completion?.body?.max_tokens).toBe(1);
+
+    const answer = result.answers.department;
+    if (answer?.type !== "choice") throw new Error("bad answer type");
+    expect(answer.choice).toBe("billing");
+    expect(answer.probabilities.billing).toBeCloseTo(0.6);
+    expect(answer.probabilities.technical).toBeCloseTo(0.3);
+    expect(answer.probabilities.sales).toBeCloseTo(0.1);
+  });
+});
+
 describe("OpenAI-compatible backend (vLLM/SGLang)", () => {
   function legacyResponse(probabilities: Record<string, number>): Response {
     const tokens = Object.keys(probabilities);
@@ -366,7 +439,7 @@ describe("OpenAI-compatible backend (vLLM/SGLang)", () => {
       }
       return legacyResponse({ A: 0.6, B: 0.3, C: 0.1 });
     };
-    const engine = new Engine(loadSettings({ backend: "vllm" }), fetchMock);
+    const engine = new Engine(loadSettings({ backend: "vllm", readout: "bias" }), fetchMock);
     const result = await engine.decide(
       {
         department: {
@@ -493,7 +566,10 @@ describe("multimodal input", () => {
     expect(content.at(-1)).toMatchObject({ type: "text" });
     expect(chat?.body.max_tokens).toBe(1);
     expect(chat?.body.logprobs).toBe(true);
-    expect(chat?.body.top_logprobs).toBe(loadSettings().logprobsK);
+    // llama.cpp defaults to the "vocab" readout: full-vocabulary top_logprobs
+    // and no logit_bias (which stock llama.cpp does not reflect in logprobs).
+    expect(chat?.body.top_logprobs).toBe(FULL_VOCAB_LOGPROBS);
+    expect(chat?.body.logit_bias).toBeUndefined();
 
     const answer = result.answers.ok;
     if (answer?.type !== "noul") throw new Error("bad answer type");
@@ -560,5 +636,183 @@ describe("multimodal input", () => {
       type: "input_audio",
       input_audio: { data: "AAAA", format: "wav" },
     });
+  });
+});
+
+describe("selective readout (vLLM/SGLang)", () => {
+  const id = (label: string) => 5000 + label.charCodeAt(0);
+
+  test("SGLang reads with the native /generate token_ids_logprob", async () => {
+    const calls: { url: string; body?: Record<string, unknown> }[] = [];
+    const fetchMock = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      const body = init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+        : undefined;
+      calls.push({ url, ...(body ? { body } : {}) });
+      if (url.endsWith("/tokenize")) {
+        return Response.json({ tokens: [id(String(body?.prompt))] });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: "test-model" }] });
+      }
+      if (url.endsWith("/generate")) {
+        const ids = body?.token_ids_logprob as number[];
+        const weights: Record<string, number> = { A: 0.6, B: 0.3, C: 0.1 };
+        const tuples = ids.map((token) => [
+          Math.log(weights[String.fromCharCode(token - 5000)]!),
+          token,
+          null,
+        ]);
+        return Response.json({
+          meta_info: {
+            output_token_ids_logprobs: [tuples],
+            prompt_tokens: 7,
+            completion_tokens: 1,
+          },
+        });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const engine = new Engine(loadSettings({ backend: "sglang" }), fetchMock);
+    const result = await engine.decide(
+      {
+        department: {
+          type: "choice",
+          instructions: "Which team?",
+          criteria: { billing: "payments", technical: "bugs", sales: "pricing" },
+        },
+      },
+      "state",
+      1,
+    );
+
+    expect(calls.some((call) => call.url.endsWith("/generate"))).toBe(true);
+    const status = engine.readoutStatus();
+    expect(status.effective).toBe("selective");
+    expect(status.warning).toBeNull();
+
+    const answer = result.answers.department;
+    if (answer?.type !== "choice") throw new Error("bad answer type");
+    expect(answer.choice).toBe("billing");
+    expect(answer.probabilities.billing).toBeCloseTo(0.6);
+  });
+
+  test("vLLM reads every label from one /v1/completions request", async () => {
+    const calls: { body?: Record<string, unknown> }[] = [];
+    const fetchMock = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      const body = init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+        : undefined;
+      if (url.endsWith("/tokenize")) {
+        return Response.json({ tokens: [id(String(body?.prompt))] });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: "test-model" }] });
+      }
+      calls.push({ ...(body ? { body } : {}) });
+      const weights: Record<string, number> = { A: 0.6, B: 0.3, C: 0.1 };
+      const map = Object.fromEntries(
+        (body?.logprob_token_ids as number[]).map((token) => [
+          String.fromCharCode(token - 5000),
+          Math.log(weights[String.fromCharCode(token - 5000)]!),
+        ]),
+      );
+      return Response.json({
+        choices: [{ logprobs: { tokens: ["x"], token_logprobs: [-0.1], top_logprobs: [map] } }],
+        usage: { prompt_tokens: 5, completion_tokens: 1 },
+      });
+    };
+    const engine = new Engine(loadSettings({ backend: "vllm" }), fetchMock);
+    const result = await engine.decide(
+      {
+        department: {
+          type: "choice",
+          instructions: "Which team?",
+          criteria: { billing: "payments", technical: "bugs", sales: "pricing" },
+        },
+      },
+      "state",
+      1,
+    );
+
+    const completions = calls.filter((call) => "logprob_token_ids" in (call.body ?? {}));
+    expect(completions).toHaveLength(1);
+    expect(engine.readoutStatus().effective).toBe("selective");
+    expect(engine.readoutStatus().warning).toBeNull();
+
+    const answer = result.answers.department;
+    if (answer?.type !== "choice") throw new Error("bad answer type");
+    expect(answer.choice).toBe("billing");
+    expect(answer.probabilities.billing).toBeCloseTo(0.6);
+  });
+
+  test("falls back to bias with a warning when the server ignores logprob_token_ids", async () => {
+    const fetchMock = async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ): Promise<Response> => {
+      const url = String(input);
+      const body = init?.body
+        ? (JSON.parse(String(init.body)) as Record<string, unknown>)
+        : undefined;
+      if (url.endsWith("/tokenize")) {
+        return Response.json({ tokens: [id(String(body?.prompt))] });
+      }
+      if (url.endsWith("/models")) {
+        return Response.json({ data: [{ id: "test-model" }] });
+      }
+      if (url.endsWith("/completions")) {
+        if (Array.isArray(body?.logprob_token_ids)) {
+          // Pre-#43463 vLLM: the field is ignored, so only the natural top-k
+          // comes back and no requested label is present.
+          return Response.json({
+            choices: [
+              { logprobs: { tokens: ["1"], token_logprobs: [-0.06], top_logprobs: [{ "1": -0.06 }] } },
+            ],
+            usage: { prompt_tokens: 5, completion_tokens: 1 },
+          });
+        }
+        const keys = Object.keys((body?.logit_bias ?? {}) as Record<string, number>);
+        return Response.json({
+          choices: [
+            {
+              logprobs: {
+                tokens: ["x"],
+                token_logprobs: [Math.log(0.5)],
+                top_logprobs: [
+                  Object.fromEntries(
+                    keys.map((key) => [key, Math.log(key === String(id("yes")) ? 0.7 : 0.3)]),
+                  ),
+                ],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 1 },
+        });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const engine = new Engine(loadSettings({ backend: "vllm" }), fetchMock);
+    const result = await engine.decide(
+      { ok: { type: "noul", instructions: "x", criteria: null } },
+      "state",
+      1,
+    );
+
+    const status = engine.readoutStatus();
+    expect(status.effective).toBe("bias");
+    expect(status.warning).toContain("selective");
+
+    const answer = result.answers.ok;
+    if (answer?.type !== "noul") throw new Error("bad answer type");
+    expect(answer.noul).toBeCloseTo(0.7);
   });
 });

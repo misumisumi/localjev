@@ -42,16 +42,28 @@ bun run eval:report
   複数スロットを同時には読めないため
 - 後端は既存の llama-server を**無パッチ**で使うことを第一目標。llama.cpp の GB10
   (SM121)対応は済んでおり、この repo でビルド対応はしない
-- 読み取り機構: `/v1/completions` + `max_tokens: 1` + `logprobs`。ラベル全トークンへの
-  **同一 logit_bias** で top-N 出現を保証し、logprob **差分**から候補間 restricted
-  softmax を復元(bias 項は差分で消える)
+- 読み取り機構: `/v1/completions` + `max_tokens: 1` + `logprobs`。ラベルは **トークン id**
+  で突き合わせる(同一文字列が複数 id に割り当たるため)。`LOCALJEV_READOUT` で3方式:
+  - `vocab`(llamacpp 既定・無パッチ): `logprobs` を語彙全体まで要求(サーバが n_vocab に
+    clamp)。`logit_bias` に依存せず全ラベルの logprob を直接読む
+  - `bias`(openai 既定): ラベル全トークンへ **同一 logit_bias** を掛けて top-K に載せ、
+    logprob **差分**から候補間 restricted softmax を復元(bias 項は差分で消える)
+  - `selective`(vllm/sglang 既定): ネイティブ API(vLLM `logprob_token_ids` /
+    SGLang `token_ids_logprob`)でラベル id の logprob だけ取得。bias 非依存・最小 payload。
+    使えない場合は **警告を1回出して `bias` にフォールバック**(vLLM の `logprob_token_ids` は
+    OpenAI 経路で v0.26.0+ のみ。旧版は無視するのでラベル欠落→フォールバック)
 - 維持する計算: `prepareQuestions` / `confidence = 1 − H(p)/ln K` /
   答案成形(choice 最良選択・score 期待値 Σ i·pᵢ)
 - 廃棄する部分: `buildOutputSchema`, `buildSystemPrompt`, `extractJson`,
   malformed リトライループ, `groups()` 逐列チャンク
 - **マルチエンジン**: `LOCALJEV_BACKEND` で方言を切替(`src/backends.ts`)。`llamacpp` は
-  logit_bias キー=トークン文字列・OpenAI 新 logprobs 形式。`vllm`/`sglang`/`openai` は
-  キー=トークン ID 文字列・レガシー `top_logprobs`。`/tokenize` も root と `/v1` で差
+  logit_bias キー=トークン文字列・OpenAI 新 logprobs 形式・`/tokenize` は root・既定 readout
+  は `vocab`。`vllm`/`sglang` は キー=トークン ID 文字列・レガシー `top_logprobs`・
+  `/tokenize` は root・既定 readout は `selective`(vLLM は `/v1/completions` の
+  `logprob_token_ids`(v0.26.0+)を1回、SGLang は `/generate` の `token_ids_logprob` を1回)。
+  `openai` は既定 readout `bias`。
+  `LOCALJEV_READOUT=auto|bias|vocab|selective` で上書き可。`GET /ready` が `backend`/
+  `readout`/`selectiveSupported`/`warning` を返す
 - **画像・音声**: Jev 拡張フィールド `images`/`audio`(data URL)。メディア付き読みのみ
   `/v1/chat/completions` の content parts へ切替(テキストは `/v1/completions` 維持)。
   音声は llamacpp 非対応(vllm/sglang/openai のみ)。thinking は分類に不要
@@ -60,15 +72,20 @@ bun run eval:report
 
 - logprobs は **pre-sampling の log(softmax(logits))**。top-N のみ返り、
   **raw logits は HTTP では取得不能**(上流の明示的な設計判断。待っている PR もなし)
-- `logit_bias` は既存のリクエストパラメータ。`/tokenize` でトークン検証可能
+- `logit_bias` は**サンプラ**として適用され、**pre-sampling logprobs には反映されない**
+  (ggml-org/llama.cpp#10783)。よって「bias でラベルを top-K に入れる」用途では使えない
+- `logit_bias` は既存のリクエストパラメータ。`/tokenize` は root でトークン検証可能。
+  `logprobs` に語彙数以上を渡すと n_vocab に clamp される(全語彙取得に使える)
 - KV 再利用(prefix 一致で prefill スキップ)の条件: state 先頭・質問后缀・byte 一致
 - 厳密 logits アクセスが必要になった場合のみ libllama / llama-cpp-python(v2、要設計判断)
 
 ## 必須検証(設計文書 §11。`bun run verify` = scripts/verify-readout.ts がライブ検証)
 
-1. **R1**: logit_bias が logprobs の softmax 計算に反映されるか(bias on/off 実験、
-   `llama-debug --save-logits` と照合)。壊れていれば v1 方式が成立しない
-2. **R2**: logprobs の top-K 上限と、bias 適用時にラベルが top-K に入るか
+1. **R1**: logit_bias が logprobs の softmax 計算に反映されるか(bias on/off でラベル
+   logprob が変わるか)。未パッチ llama.cpp では反映されない → `vocab` 必須
+   (`llama-debug --save-logits` と照合可)
+2. **R2**: 設定した readout(`vocab`/`bias`/`selective`)で全ラベルが取得できるか
+   (top-K 上限・ネイティブ API の有無も確認)
 3. **R3**: ラベル(`A..Z`, `0..9`, `yes`, `no`)が対象トークナイザで単一トークンか
 
 ## 上流リファレンス

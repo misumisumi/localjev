@@ -1,12 +1,15 @@
-import type { Settings } from "./config";
+import type { Settings, ReadoutSetting } from "./config";
 import { apiBaseUrl, upstreamRoot } from "./config";
 import {
   collectLogprobs,
   MediaUnsupportedError,
   resolveDialect,
   type Dialect,
+  type EngineKind,
   type LabelToken,
+  type LogprobEntry,
   type MediaParts,
+  type ReadoutMode,
 } from "./backends";
 import type { Answer, Described, JsonValue, Question } from "./types";
 
@@ -54,6 +57,13 @@ export interface DecisionEngine {
   ready?(): Promise<boolean>;
   close?(): Promise<void>;
   upstreamModelId?(): string | null;
+  readoutStatus?(): {
+    backend: string;
+    configured: string;
+    effective: string;
+    selectiveSupported: boolean;
+    warning: string | null;
+  };
 }
 
 type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -196,8 +206,9 @@ export function softmaxFromLogprobs(values: (number | null)[]): number[] {
   const present = values.filter((value): value is number => value !== null);
   if (present.length === 0) {
     throw new BackendProtocolError(
-      "no answer label appeared in the upstream top logprobs; " +
-        "increase LOCALJEV_LOGPROBS_K or check LOCALJEV_LABEL_BIAS",
+      "no answer label appeared in the upstream logprobs; " +
+        "increase LOCALJEV_LOGPROBS_K, or use LOCALJEV_READOUT=vocab " +
+        "(stock llama.cpp ignores logit_bias in pre-sampling logprobs)",
     );
   }
   const maximum = Math.max(...present);
@@ -279,6 +290,8 @@ export class Engine implements DecisionEngine {
   private resolvedModel: string | null = null;
   private modelPromise: Promise<string> | null = null;
   private readonly labelTokens = new Map<string, Promise<number>>();
+  private effectiveReadoutValue: ReadoutMode | null = null;
+  private selectiveWarning: string | null = null;
 
   constructor(
     private readonly settings: Settings,
@@ -378,6 +391,69 @@ export class Engine implements DecisionEngine {
     return pending;
   }
 
+  private readout(): ReadoutMode {
+    return this.settings.readout === "auto" ? this.dialect.defaultReadout : this.settings.readout;
+  }
+
+  // Observability for `/ready`: the configured backend/readout, whether the
+  // backend exposes a selective API, and any one-time fallback warning.
+  readoutStatus(): {
+    backend: EngineKind;
+    configured: ReadoutSetting;
+    effective: ReadoutMode;
+    selectiveSupported: boolean;
+    warning: string | null;
+  } {
+    return {
+      backend: this.settings.backend,
+      configured: this.settings.readout,
+      effective: this.effectiveReadoutValue ?? this.readout(),
+      selectiveSupported: Boolean(this.dialect.selective),
+      warning: this.selectiveWarning,
+    };
+  }
+
+  private noteSelectiveFallback(detail: string): void {
+    const message = `LOCALJEV_READOUT=selective unavailable, falling back to bias: ${detail}`;
+    if (this.selectiveWarning !== message) {
+      this.selectiveWarning = message;
+      console.warn(`[localjev] ${message}`);
+    }
+  }
+
+  private async selectiveRead(
+    prompt: string,
+    labels: LabelToken[],
+    model: string,
+  ): Promise<ReadResult> {
+    const spec = this.dialect.selective!;
+    const requests = spec.request(prompt, labels, model);
+    const responses: unknown[] = [];
+    let inputTokens = 0;
+    let outputTokens = 0;
+    for (const request of requests) {
+      const payload = await this.upstreamRequest(request.path, request.body, request.root);
+      responses.push(payload);
+      const usage = record(payload) && record(payload.usage) ? payload.usage : undefined;
+      const meta = record(payload) && record(payload.meta_info) ? payload.meta_info : undefined;
+      inputTokens += numeric(usage?.prompt_tokens ?? usage?.input_tokens ?? meta?.prompt_tokens);
+      outputTokens += numeric(
+        usage?.completion_tokens ?? usage?.output_tokens ?? meta?.completion_tokens,
+      );
+    }
+    const map = spec.parse(responses, labels);
+    const values = labels.map((label) => map.get(label.id) ?? null);
+    // A selective read is only valid if every requested label came back; a
+    // partial result means the server ignored the selected-token request (e.g.
+    // a vLLM that predates logprob_token_ids), so fall back instead of silently
+    // treating the missing labels as zero.
+    if (values.some((value) => value === null)) {
+      throw new BackendProtocolError("selective readout did not return every label logprob");
+    }
+    this.effectiveReadoutValue = "selective";
+    return { probabilities: softmaxFromLogprobs(values), inputTokens, outputTokens };
+  }
+
   private async readSlot(
     prompt: string,
     labels: LabelToken[],
@@ -385,6 +461,29 @@ export class Engine implements DecisionEngine {
   ): Promise<ReadResult> {
     const model = await this.resolveModel();
     const useChat = Boolean(media && (media.images.length > 0 || media.audio.length > 0));
+    let readout = this.readout();
+
+    if (readout === "selective") {
+      if (!this.dialect.selective || useChat) {
+        this.noteSelectiveFallback(
+          useChat
+            ? "selective readout is only available for text reads"
+            : `backend ${this.settings.backend} exposes no selective logprob API`,
+        );
+        readout = "bias";
+      } else {
+        try {
+          return await this.selectiveRead(prompt, labels, model);
+        } catch (error) {
+          this.noteSelectiveFallback(
+            error instanceof Error ? error.message : "selective request failed",
+          );
+          readout = "bias";
+        }
+      }
+    }
+
+    this.effectiveReadoutValue = readout;
     const request = useChat
       ? this.dialect.chat(
           prompt,
@@ -394,6 +493,7 @@ export class Engine implements DecisionEngine {
           this.settings.logprobsK,
           this.settings.labelBias,
           this.settings.disableThinking,
+          readout,
         )
       : this.dialect.completion(
           prompt,
@@ -401,18 +501,21 @@ export class Engine implements DecisionEngine {
           model,
           this.settings.logprobsK,
           this.settings.labelBias,
+          readout,
         );
     const payload = await this.upstreamRequest(request.path, request.body);
     const parsed = collectLogprobs(payload);
     const byToken = new Map<string, number>();
     const byId = new Map<number, number>();
-    const add = (token: string, logprob: number) => {
-      byToken.set(token, logprob);
-      const match = /^token_id:(\d+)$/.exec(token);
-      if (match) byId.set(Number(match[1]), logprob);
+    const add = (entry: LogprobEntry) => {
+      byToken.set(entry.token, entry.logprob);
+      if (entry.id !== undefined) byId.set(entry.id, entry.logprob);
+      // Some backends surface the id as a `token_id:NNN` token string.
+      const match = /^token_id:(\d+)$/.exec(entry.token);
+      if (match) byId.set(Number(match[1]), entry.logprob);
     };
-    if (parsed.generated) add(parsed.generated.token, parsed.generated.logprob);
-    for (const entry of parsed.entries) add(entry.token, entry.logprob);
+    if (parsed.generated) add(parsed.generated);
+    for (const entry of parsed.entries) add(entry);
     if (byToken.size === 0) {
       throw new BackendProtocolError(
         "upstream did not return token logprobs; enable logprobs on the inference backend",
@@ -421,6 +524,9 @@ export class Engine implements DecisionEngine {
     const usage = record(payload) && record(payload.usage) ? payload.usage : {};
     return {
       probabilities: softmaxFromLogprobs(
+        // Match by tokenizer id first: several token ids can decode to the same
+        // label string, and only the id returned by /tokenize is the one
+        // logit_bias targeted and the one the engine asked for.
         labels.map((entry) => byId.get(entry.id) ?? byToken.get(entry.label) ?? null),
       ),
       inputTokens: numeric(usage.prompt_tokens ?? usage.input_tokens),
