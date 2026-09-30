@@ -1,0 +1,57 @@
+# Test inference server: Gemma 4 E2B via SGLang (see deploy/testllm-sglang/Dockerfile).
+# Joins the "llm" network so LocalJev can reach it as http://testllm:9010 and
+# exercise the `selective` readout (SGLang native /generate token_ids_logprob).
+#
+# NOTE: podman kube play has no --device flag for GPU/CDI passthrough. With a GPU
+# host prefer (stop the existing testllm first to avoid VRAM contention):
+#   podman volume create testllm-hf
+#   podman run -d --name testllm --network llm --device nvidia.com/gpu=all \
+#     -p 9010:9010 -v testllm-hf:/hf -e HF_HOME=/hf localhost/testllm-sglang:latest
+apiVersion: v1
+kind: Pod
+metadata:
+  name: testllm
+  labels:
+    app: testllm
+spec:
+  restartPolicy: Always
+  containers:
+    - name: testllm
+      image: localhost/testllm-sglang:latest
+      imagePullPolicy: Never
+      ports:
+        - name: http
+          containerPort: 9010
+          hostPort: 9010
+      env:
+        - name: HF_HOME
+          value: /hf
+        - name: TESTLLM_PORT
+          value: "9010"
+        - name: TESTLLM_MAX_LEN
+          value: "4096"
+        - name: TESTLLM_MEM_FRACTION
+          value: "0.6"
+      volumeMounts:
+        - name: hf-cache
+          mountPath: /hf
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9010
+        initialDelaySeconds: 30
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 120
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 9010
+        initialDelaySeconds: 120
+        periodSeconds: 30
+        timeoutSeconds: 3
+  volumes:
+    - name: hf-cache
+      hostPath:
+        path: /tmp/localjev-hf
+        type: DirectoryOrCreate

@@ -1,0 +1,46 @@
+# Test inference server: Gemma 4 E2B via llama.cpp (see deploy/testllm/Dockerfile).
+# Joins the "llm" network so LocalJev can reach it as http://testllm:9010.
+#
+# NOTE: podman kube play has no --device flag for GPU/CDI passthrough. With a
+# GPU host prefer:
+#   podman run -d --name testllm --network llm --device nvidia.com/gpu=all \
+#     -p 9010:9010 localhost/testllm:latest
+# Without a GPU this manifest still works, but llama-server falls back to CPU.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: testllm
+  labels:
+    app: testllm
+spec:
+  restartPolicy: Always
+  containers:
+    - name: testllm
+      image: localhost/testllm:latest
+      imagePullPolicy: Never
+      ports:
+        - name: http
+          containerPort: 9010
+          hostPort: 9010
+      env:
+        - name: TESTLLM_PORT
+          value: "9010"
+        - name: TESTLLM_CTX
+          value: "16384"
+        - name: TESTLLM_NGL
+          value: "99"
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 9010
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 60
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 9010
+        initialDelaySeconds: 60
+        periodSeconds: 30
+        timeoutSeconds: 3

@@ -1,0 +1,39 @@
+# LocalJev pod. Runs on the same podman network as the inference server so that
+# aardvark-dns resolves the upstream pod name (do NOT set dnsPolicy/dnsConfig,
+# and do NOT use hostNetwork).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: localjev
+  labels:
+    app: localjev
+spec:
+  restartPolicy: Always
+  containers:
+    - name: localjev
+      image: localhost/localjev:latest
+      imagePullPolicy: Never
+      ports:
+        - name: http
+          containerPort: 8081
+          hostPort: 8081
+      envFrom:
+        - configMapRef:
+            name: localjev-config
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: 8081
+        initialDelaySeconds: 3
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+      livenessProbe:
+        # /health does not depend on the upstream, so a down inference server
+        # never restarts LocalJev. Readiness (/ready) reflects upstream reachability.
+        httpGet:
+          path: /health
+          port: 8081
+        initialDelaySeconds: 5
+        periodSeconds: 20
+        timeoutSeconds: 3

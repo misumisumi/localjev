@@ -1,0 +1,29 @@
+# Test stack: point LocalJev at the local Gemma 4 E2B test server instead of the
+# production llama pod. Use this configmap together with deploy/localjev-pod.yaml:
+#
+#   podman kube play --replace --network llm \
+#     --configmap deploy/localjev-config.test.yaml deploy/localjev-pod.yaml
+#
+# `llamacpp` defaults to the `vocab` readout: stock llama.cpp returns
+# pre-sampling logprobs that ignore `logit_bias`, so LocalJev requests the whole
+# vocabulary and reads each label directly. `LOCALJEV_LOGPROBS_K` is unused in
+# `vocab` mode; a read is ~26 MB (Gemma 4 E2B has a 262144-token vocabulary), so
+# in-flight reads are capped lower to bound RAM.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localjev-config
+data:
+  LOCALJEV_UPSTREAM: "http://testllm:9010"
+  LOCALJEV_BACKEND: "llamacpp"
+  LOCALJEV_READOUT: "vocab"
+  LOCALJEV_UPSTREAM_MODEL: ""
+  LOCALJEV_HOST: "0.0.0.0"
+  LOCALJEV_PORT: "8081"
+  LOCALJEV_TIMEOUT: "120"
+  LOCALJEV_MAX_INFLIGHT: "2"
+  LOCALJEV_MAX_QUEUE: "64"
+  LOCALJEV_LABEL_BIAS: "10"
+  LOCALJEV_LOGPROBS_K: "64"
+  LOCALJEV_PERMUTE_DEFAULT: "false"
+  LOCALJEV_DISABLE_THINKING: "false"

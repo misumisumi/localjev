@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: localjev-config
+data:
+  # llama-server pod reachable by its pod name on the "llm" network.
+  LOCALJEV_UPSTREAM: "http://qwen38-flash-next-mtp:9010"
+  LOCALJEV_BACKEND: "llamacpp"
+  # Stock llama.cpp ignores logit_bias in its pre-sampling logprobs, so labels
+  # are read from the full vocabulary (`vocab`). One read is ~15-26 MB depending
+  # on the model vocabulary; lower LOCALJEV_MAX_INFLIGHT if RAM is tight. Use
+  # `bias` only if this server is verified to reflect logit_bias (bun run verify).
+  LOCALJEV_READOUT: "vocab"
+  LOCALJEV_UPSTREAM_MODEL: ""
+  LOCALJEV_HOST: "0.0.0.0"
+  LOCALJEV_PORT: "8081"
+  LOCALJEV_TIMEOUT: "60"
+  LOCALJEV_MAX_INFLIGHT: "4"
+  LOCALJEV_MAX_QUEUE: "64"
+  LOCALJEV_LABEL_BIAS: "10"
+  LOCALJEV_LOGPROBS_K: "64"
+  LOCALJEV_PERMUTE_DEFAULT: "false"
+  LOCALJEV_DISABLE_THINKING: "false"
